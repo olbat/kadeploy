@@ -1,0 +1,89 @@
+#!/usr/bin/ruby
+
+$:.unshift File.dirname(__FILE__)
+
+require 'common-g5k'
+
+def test_cmd(script)
+  "cd #{TEST_DIR} && ruby #{script} --verbose -- #{TEST_CONFIG} ~/NODEFILE"
+end
+
+def run_test(name,cmd)
+  puts "Running #{name} test"
+  stdout,stderr,status = ssh($user,$host,test_cmd(cmd),false)
+  puts '... done'
+  puts 'Failed !' unless status
+  puts "----------------" if !stdout.empty? or !stderr.empty?
+  puts "\t" + stdout.lines.to_a * "\t" unless stdout.empty?
+  puts "----------------" if !stdout.empty? and !stderr.empty?
+  puts "\t" + stderr.lines.to_a * "\t" unless stderr.empty?
+  puts "----------------" if !stdout.empty? or !stderr.empty?
+  status
+end
+
+unless ARGV.size >= 2
+  vars = KADEPLOY_ENV_VARS.inject(''){|tmp,var| tmp << "  #{var} (default: #{self.class.const_get(var)})\n"}
+  error("usage: #{$0} [git:|gerrit:]<commit/branch> <frontend user@host> [<sources dir>] [<test_config>]\ncustomizable env vars:\n#{vars}\nsamples:\n  #{$0} master frontend@node-1 (git is used by default)\n  #{$0} git:3.1.7 frontend@node-2 test_config.yml kadeploy3-sources/\n  #{$0} git:5f4b6c54949b0769596b10087c1d14150930d84f frontend@node-3\n  #{$0} gerrit:refs/changes/27/1027/13 frontend@node-4")
+end
+
+$repo,$commit,$repo_kind = get_repo_commit(ARGV[0])
+tmp=ARGV[1].split('@')
+$user=tmp[0]
+$host=tmp[1]
+
+if ARGV[2] and !ARGV[2].empty? and !File.readable?(ARGV[2])
+  error("source file not found '#{ARGV[2]}'")
+end
+
+if ARGV[3] and !ARGV[3].empty? and !File.readable?(ARGV[3])
+  error("test config file not found '#{ARGV[3]}'")
+end
+
+puts "Cleaning testsuite"
+ssh($user,$host,"rm -rf #{TMP_DIR}")
+puts '... done'
+
+if ARGV[2] and !ARGV[2].empty?
+  puts "Copying testsuite"
+  scp($user,$host,ARGV[2],TMP_DIR)
+  puts '... done'
+else
+  begin
+    puts "Fetching #{$repo_kind} repository #{$commit}"
+    $git_repo=fetch_git_repo($repo_kind,$repo,$commit)
+    puts "... done"
+
+    puts "Copying testsuite"
+    scp($user,$host,$git_repo,TMP_DIR)
+    puts '... done'
+  ensure
+    cmd("rm -Rf #{$git_repo}",false) if $git_repo
+  end
+end
+
+if ARGV[3] and !ARGV[3].empty?
+  puts "Copying testsuite config"
+  scp($user,$host,ARGV[3],TEST_DIR)
+  puts '... done'
+end
+
+puts ''
+
+success = true
+
+success = success & run_test('auth',TEST_AUTH)
+success = success & run_test('kadeploy',TEST_KADEPLOY)
+success = success & run_test('kareboot',TEST_KAREBOOT)
+success = success & run_test('kapower',TEST_KAPOWER)
+success = success & run_test('kaenv',TEST_KAENV)
+success = success & run_test('kastat',TEST_KASTAT)
+success = success & run_test('kanodes',TEST_KANODES)
+
+puts "\n\n"
+if success
+  puts 'Global: Success'
+  exit 0
+else
+  puts 'Global: Fail'
+  exit 1
+end

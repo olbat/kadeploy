@@ -1,0 +1,131 @@
+#!/usr/bin/ruby -w
+$:.unshift(ENV['KADEPLOY3_LIBS']) if ENV['KADEPLOY3_LIBS']
+
+Signal.trap("INT") do
+  $stdout.puts "\nSIGINT trapped"
+  Kadeploy::KastatClient.kill() rescue nil
+  exit!(1)
+end
+
+require 'kadeploy3/client'
+require 'optparse/time'
+
+module Kadeploy
+
+class KastatClient < Client
+  FIELDS = ['wid','user','hostname','step1','step2','step3','timeout_step1','timeout_step2','timeout_step3','retry_step1','retry_step2','retry_step3','start','step1_duration','step2_duration','step3_duration','env','md5','success','error']
+
+  def self.operation()
+    'Stats operation'
+  end
+
+  def self.load_options()
+    global_load_options().merge(
+      {
+        :kind => nil,
+        :operation => nil,
+        :date_min => nil,
+        :date_max => nil,
+        :min_retries => nil,
+        :min_failure_rate => nil,
+        :limit => nil,
+        :step_retries => nil,
+        :fields => nil,
+        :wid => nil,
+      }
+    )
+  end
+
+  def self.parse_options()
+    global_parse_options() do |opt,options|
+      opt.separator "General options:"
+      add_opt(opt,"-a", "--all", "Print all the information") {
+        options[:kind] = :all
+      }
+      add_opt(opt,"-b", "--failure-rate [RATE]", /^0?\.\d+|1(?:\.0)?$/, "Print the nodes which have a minimum failure-rate of RATE 1 (0 <= RATE <= 1)") { |r|
+        options[:kind] = :failure_rates
+        options[:min_failure_rate] = r.to_f if r
+      }
+      parse_machinefile(opt,options)
+      add_opt(opt,"-F", "--fields FIELDS", Array, "Only print the selected fields (#{FIELDS.join(', ')})") { |f|
+        options[:fields] = f
+      }
+      parse_machine(opt,options)
+      add_opt(opt,"-o", "--operation OP", ['deploy','reboot','power'], "Only print statistics about a specific operation") { |n|
+        options[:operation] = n
+      }
+      add_opt(opt,"-r", "--min-retries NB", /^\d+$/, "Print the statistics about the nodes that need at least NB attempts to perform specific steps") { |n|
+        options[:min_retries] = n.to_i
+      }
+      add_opt(opt,"-s", "--retry-steps STEPS", Array, "Apply the retry filter on the given steps (1, 2 or 3)") { |s|
+        options[:step_retries] = s
+      }
+      add_opt(opt,"-w", "--workflow-id ID", "Get the stats of a specific workflow") { |w|
+        options[:wid] = w
+      }
+      add_opt(opt,"-x", "--date-min TIME", Time, "Get the stats from this date (yyyy-mm-dd hh:mm:ss)") { |d|
+        options[:date_min] = d
+      }
+      add_opt(opt,"-y", "--date-max TIME", Time, "Get the stats to this date (yyyy-mm-dd hh:mm:ss)") { |d|
+        options[:date_max] = d
+      }
+      add_opt(opt,"--limit N", /^\d+$/, "Print a maximal number of N results") {|n|
+        options[:limit] = n
+      }
+      add_opt(opt,"--sort VALS", Array, "Sort the result on some specific fields (default: start)") { |s|
+        options[:sort] = s
+      }
+    end
+  end
+
+  def self.check_options(options)
+    if options[:fields]
+      unless (fields = (options[:fields] - (FIELDS & options[:fields]))).empty?
+        error("Invalid field(s) #{fields.join(', ')}")
+        return false
+      end
+    end
+    true
+  end
+
+  def self.prepare(options)
+    params = super(options)
+    params[:kind] = options[:kind] if options[:kind]
+    params[:nodes] = options[:nodes] if options[:nodes]
+    params[:fields] = options[:fields] if options[:fields]
+    params[:limit] = options[:limit] if options[:limit]
+    params[:sort] = options[:sort] if options[:sort]
+    params[:date_min] = options[:date_min].httpdate if options[:date_min]
+    params[:date_max] = options[:date_max].httpdate if options[:date_max]
+    params[:wid] = options[:wid] if options[:wid]
+    params[:min_failure_rate] = options[:min_failure_rate] if options[:min_failure_rate]
+    params[:min_retries] = options[:min_retries] if options[:min_retries]
+    params[:step_retries] = options[:step_retries] if options[:step_retries]
+    params
+  end
+
+  def run(options,params)
+    path = api_path()
+    path = File.join(path,options[:operation]) if options[:operation]
+
+    get(path,params)
+  end
+
+  def result(options,ret)
+    case options[:kind]
+    when :failure_rates
+      ret.each_pair do |host,rate|
+        debug "#{host}: #{rate}"
+      end
+    else
+      debug ret unless ret.empty?
+    end
+  end
+end
+
+end
+
+if __FILE__ == $0
+  Kadeploy::KastatClient.launch()
+end
+

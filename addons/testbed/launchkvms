@@ -1,0 +1,77 @@
+#!/usr/bin/ruby
+
+require 'socket'
+require 'resolv'
+
+# Files
+IPXE_ISO_FILE='/root/ipxe.iso'
+
+# Sizes in Mo
+RAM_SIZE = 350
+FS_SIZE = 564
+
+FS_TYPE = 'qcow2'
+FS_FILE = "disk.#{FS_TYPE}"
+#NET_MODEL = 'e1000'
+HOST_FREE_MEM_SIZE = 1024
+
+TMP_DIR = '/tmp/katestbed'
+
+def cmd(cmd,critical=true)
+  ret = `#{cmd}`
+  if critical and !$?.success?
+    $stderr.puts "error when executing '#{cmd}': #{ret}"
+    exit 1
+  end
+  ret
+end
+
+myip=Resolv.getaddress(Socket.gethostname)
+
+# Load tun driver
+cmd("modprobe tun")
+
+# Cleaning everything
+cmd("killall kvm &>/dev/null; true")
+sleep(4)
+
+#cmd("umount #{File.join(TMP_DIR,'*')}; true")
+mounts = cmd('mount')
+threads = []
+mounts.each do |line|
+  if line =~ /^tmpfs\s+on\s+(\S+)\s+type\s+tmpfs.*$/
+    tmp = Regexp.last_match(1)
+    if tmp.include?(TMP_DIR)
+      threads << Thread.new(tmp) do |dir|
+        cmd("umount #{dir}")
+        sleep(1)
+        cmd("rm -Rf #{dir}")
+      end
+    end
+  end
+end
+threads.each { |thread| thread.join }
+cmd("rm -Rf #{TMP_DIR}")
+
+cmd("mkdir -p #{TMP_DIR}")
+count = 0
+ARGF.each do |line|
+  if line =~ /^\s*(\S+)\s+(\S+)\s+(\S+)\s+#{myip}\s*(\d+)\s*$/
+    vmname = Regexp.last_match(1)
+    vmip = Regexp.last_match(2)
+    vmmac = Regexp.last_match(3)
+    vmmonport = Regexp.last_match(4)
+
+    fsdir = File.join(TMP_DIR,vmname)
+    cmd("mkdir -p #{fsdir}")
+    cmd("mount -t tmpfs -o size=#{FS_SIZE}M tmpfs #{fsdir}")
+    fsfile = File.join(fsdir,FS_FILE)
+    cmd("rm -f #{fsfile}")
+    cmd("qemu-img create -f #{FS_TYPE} #{fsfile} #{FS_SIZE}M")
+    cmd("nohup kvm -net nic,macaddr=#{vmmac} -net tap -boot d -cdrom #{IPXE_ISO_FILE} -m #{RAM_SIZE}M -drive file=#{fsfile} -name #{vmname} -monitor tcp::#{vmmonport},server,nowait -vnc :#{count} 1>/dev/null 2>/dev/null &")
+    sleep(0.3)
+    #puts "Started #{vmname} (mac:#{vmmac})"
+    count += 1
+  end
+end
+

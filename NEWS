@@ -1,0 +1,156 @@
+## New in 3.2.1 ##
+== Internals ==
+!! Changes in configuration files !!
+  - It's now possible to define new alias DEFAULT_CONNECTOR in external section
+    with default_connector item.
+    It can be used  with the following fields: taktuk connector and all remotes operations.
+  - It's now possible to specify the sleep time before ping in "wait reboot" step.
+    This is a new parameter in cluster configuration called "sleep_time_before_ping" in "boot" section.
+
+## New in 3.2 ##
+== User interface ==
+* Environments files in old description format are no longer supported
+  A migration script is available in addons/kaenv_migration
+  (see doc sec/4.2.4, Environment description)
+* It's now possible to export files to the server a secured way
+  (see doc sec/4.2.2)
+* Environment's demolishing tag related commands now refers to destructive tag
+
+== REST API ==
+* It's now possible to interact with the server using a REST API (see the Network API documentation)
+
+== Deployement environment generation scripts ==
+* The ssh key addons/ssh/id_deploy is not copied on deployment kernel anymore,
+  it's recommanded to use the ssh agent for ssh communications
+
+== Internals ==
+* Client/Server interactions are now performed using a REST API instead of DRb
+  (see doc sec/5)
+* The kadeploy service now run an HTTP server: ruby/Webrick (see doc sec/5.1.4)
+* kadeploy3d launcher has be rewritten in ruby, new options available
+  (see doc sec/4.2.1)
+* Clients has been rewritten in single-file ruby scripts
+* The debian packaging has been reworked to fit with the standards
+* It's now possible to use the Kascade software to send the environment
+  (see doc sec/2.4 and addons/kascade/README)
+
+!! Changes in configuration files !!
+* General configuration (doc sec/2.1)
+  - The general configuration file is now named server.conf
+  - An authentication method for administrators has to be providden
+  - The server can be launched in secure mode using a custom certificate/key
+  - Clients can be forced to export files in secure mode
+  - You can now specify a log file and a debug file, no more syslog
+  - It's now possible to specify options for tarballs manipulations
+  - End of deployment/reboot/power hooks are now specified in the field 'hooks'
+  - It's now possible to specify a threshold for the autoclean loop
+  - It's now possible to specify a ssh private key path to load in ssh-agent
+* Clusters configuration (doc sec/2.3)
+  - The clusters configuration file is now named clusters.conf
+* Command configuration (doc sec/2.7)
+  - The command configuration file is now named command.conf
+* Cluster specific configuration (doc sec/2.4)
+  - It's now possible to specify Kascade as BroadcastEnv method
+* Client configuration file (doc sec/3)
+  - The client configuration file is now named client.conf
+  - The connection to a specific server can be secure or not
+
+!! Database update !!
+* The Kadeploy3 database have to be updated with the script db/update-3.2.sql
+
+
+## New in 3.1.7 ##
+== User interface ==
+* Environments description files are now written in YAML
+  A migration script is available in addons/kaenv_migration
+  (see doc sec/4.2.4, Environment description)
+* It is now possible to deploy multi-partitioned FSArchiver images
+  (see doc sec/4.7)
+* Kastat now have an option only to display statistics of the last deployment
+* It is now possible to deploy XZ-compressed images
+
+== Internals ==
+* Partitioning operation is now performed with an administrator-providen script
+  (see doc sec/2.6)
+* Bootloader install is now performed with an administrator-providen script
+  (see doc sec/2.5)
+* Deployment of multi-partitioned environments (see doc sec/4.7)
+* Handle of GrubPXE disks as PXE boot method (see doc sec/2.2)
+* PXE profiles handling is now customizable (see doc sec/2.1,2.2)
+  - Each kind of reboot (local, network, user) can be made using a different
+    boot method (PXElinux, iPXE, GrubPXE, ...)
+  - The directory containing the profile is customizable
+  - The way to generate the filename of profiles is customizable
+* Filesystems suported by the deployment environment are now explicit in the
+  configuration so the deployment process can be modified if the filesystem
+  of the deployed environment is or isn't known by the deployment environment
+  (see doc sec/2.4,2.4.2)
+* Rewritten caching system, no more 1-hour lock on the cached files
+
+!! Changes in configuration files !!
+* General configuration (doc sec/2.1)
+  - The way to specify PXE configuration has changed
+* Cluster specific configuration (doc sec/2.3)
+  - A script have to be specified for the partitioning operations
+  - A script have to be specified for the bootloader install
+  - The 'kernels' field has been moved to 'boot/kernels'
+  - A specific PXE header can be specified for each kind of reboot
+  - The string \n is no more replaced by a new line in PXE headers
+    (use YAML notation for multi-line headers)
+  - A list of supported filesystems have to be given for the deployment env.
+* Clusters configuration file (doc sec/2.2)
+  - The fields concerning the partition maps have been removed, this
+    functionality is no more supported
+* Changes in the partitioning maps (doc sec/2.4)
+  - Partition maps are not needed anymore
+
+!! Database update !!
+* The Kadeploy3 database have to be updated with the script db/update-3.1.7.sql
+
+
+## New in 3.1.6 ##
+== User interface ==
+* The CLI display has been modified to look more clear
+* Get the status of the deploying nodes by pressing the <ENTER> key
+* Use variables in custom PXE profiles (see doc sec/4.2.2, Use Case 6)
+* Create custom microsteps before, after or instead of an existing one
+  (see doc sec/4.2.2, Use Case 10)
+* Deploy directly on a block device with a DD image of the entire disk
+  (see doc sec/4.2.2, Use Case 11)
+* The demolishing_env field of environments descriptions is now a boolean
+  (see doc sec/4.2.4, Environment description)
+* A lot of variables are now exported by Kadeploy when running scripts
+  (see doc sec/4.5)
+
+== Internals ==
+* New automata to handle deployments workflow:
+  - Specify timeouts and retries on automata's microsteps (see doc sec/2.3.2)
+  - Improved deployment process for DD images
+  - Create custom microsteps before, after or instead of an existing one
+    (see doc sec/2.3.2, Custom operations)
+  - Kexec is now available at the first reboot (SetDeploymentEnv macro-step)
+    (see doc sec/2.3.2, The automata macro-steps)
+* Parallel commands execution:
+  - New TakTuk wrapper
+  - Execution of system commands
+  - Better gathering of commands statuses and outputs
+* Some other minor changes:
+  - RC scripts are now saving launch time errors in the syslog
+  - Doc: Creation of (new) deployment environments (see doc sec/2.6.2)
+  - Doc: Do a custom partitioning (see doc sec/4.7)
+  - Unit test suite
+  - A lot of bug fixes
+
+!! Changes in configuration files !!
+* Cluster specific configuration (doc sec/2.3)
+  - The fields concerning the demolishing settings (threshold value, ...)
+    have been removed, this functionality is no more supported
+  - The fields 'retries' of each macro step description do now have the right
+    behavior, it specifies the number of retries instead of the number of tries
+* Clusters configuration file (doc sec/2.2)
+  - For display purposes, a prefix can be associated to each cluster
+* Changes in the partitioning maps (doc sec/2.4)
+  - You can now specify parted maps (instead of parted scripts)
+  - In your maps you can use several PARTTYPE<N> instead of a single one
+* Pre/post install files:
+  - Kadeploy exports more variables when running scripts (see doc sec/4.5)

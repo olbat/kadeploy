@@ -1,0 +1,96 @@
+#!/usr/bin/ruby -w
+$:.unshift(ENV['KADEPLOY3_LIBS']) if ENV['KADEPLOY3_LIBS']
+
+Signal.trap("INT") do
+  $stdout.puts "\nSIGINT trapped"
+  Kadeploy::KapowerClient.kill() rescue nil
+  exit!(1)
+end
+
+require 'kadeploy3/client'
+
+module Kadeploy
+
+class KapowerClient < ClientWorkflow
+  def self.operation()
+    'Power operation'
+  end
+
+  def self.load_options()
+    global_load_options().merge(
+      {
+        :operation => nil,
+        :level => nil,
+      }
+    )
+  end
+
+  def self.parse_options()
+    global_parse_options() do |opt,options|
+      opt.separator "General options:"
+      parse_op_level(opt,options)
+      add_opt(opt,"--off", "Shutdown the nodes") {
+        options[:operation] = :off
+      }
+      add_opt(opt,"--on", "Power on the nodes") {
+        options[:operation] = :on
+      }
+      add_opt(opt,"--status", "Get the status of the nodes") {
+        options[:operation] = :status
+      }
+    end
+  end
+
+  def self.check_options(options)
+    return false unless super(options)
+
+    if !options[:operation] or options[:operation].empty?
+      error("No operation is chosen")
+      return false
+    end
+
+    unless [:on,:off,:status].include?(options[:operation])
+      error("Invalid operation #{options[:operation]}")
+      return false
+    end
+
+    if options[:level] and options[:operation] == :status
+      error("Specifying the level is useless with the status operation")
+      return false
+    end
+
+    true
+  end
+
+  def self.prepare(options)
+    params = super(options)
+
+    case options[:operation]
+    when :on, :off
+      params[:status] = options[:operation]
+      params[:level] = options[:level] if options[:level]
+    when :status
+    else
+      raise
+    end
+
+    params
+  end
+
+  def run(options,params)
+    case options[:operation]
+    when :on, :off
+      run_workflow(options,params,:put)
+    when :status
+      run_workflow(options,params,:get)
+    else
+      raise
+    end
+  end
+end
+
+end
+
+if __FILE__ == $0
+  Kadeploy::KapowerClient.launch()
+end

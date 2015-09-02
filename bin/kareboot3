@@ -1,0 +1,175 @@
+#!/usr/bin/ruby -w
+$:.unshift(ENV['KADEPLOY3_LIBS']) if ENV['KADEPLOY3_LIBS']
+
+Signal.trap("INT") do
+  $stdout.puts "\nSIGINT trapped"
+  Kadeploy::KarebootClient.kill() rescue nil
+  exit!(1)
+end
+
+require 'kadeploy3/client'
+require 'uri'
+
+module Kadeploy
+
+class KarebootClient < ClientWorkflow
+  def self.operation()
+    'Reboot operation'
+  end
+
+  def self.load_options()
+    global_load_options().merge(
+      {
+        :operation => :simple,
+        :env_name => nil,
+        :env_version => nil, #By default we load the latest version
+        :check_demolishing => false,
+        :block_device => nil,
+        :deploy_part => nil,
+        :pxe_profile => nil,
+        :pxe_files => [],
+        :pxe_profile_singularities => nil,
+        :key => nil,
+        :level => nil,
+        :reboot_classical_timeout => nil,
+        :vlan => nil,
+        :secure => false,
+      }
+    )
+  end
+
+  def self.parse_options()
+    global_parse_options() do |opt,options|
+      opt.separator "General options:"
+      parse_block_device(opt,options)
+      add_opt(opt,"-c", "--check-destructive-tag", "Check if some nodes was deployed with an environment that have the destructive tag") {
+        options[:check_demolishing] = true
+      }
+      parse_env_name(opt,options){ options[:env_kind] = :database }
+      parse_keyfile(opt,options)
+      parse_op_level(opt,options)
+      parse_deploy_part(opt,options)
+      add_opt(opt,"-r", "--reboot-kind REBOOT_KIND", ['set_pxe', 'simple', 'deploy_env', 'recorded_env'], "Specify the reboot kind (set_pxe, simple, deploy_env, recorded_env)") { |k|
+        options[:operation] = k.strip.downcase.to_sym
+      }
+      parse_env_user(opt,options)
+      parse_vlan(opt,options)
+      parse_pxe_profile(opt,options)
+      parse_pxe_pattern(opt,options)
+      parse_pxe_files(opt,options)
+      parse_env_version(opt,options)
+      parse_timeout_reboot(opt,options)
+      parse_secure(opt,options)
+    end
+  end
+
+  def self.check_options(options)
+    return false unless super(options)
+
+    if !options[:operation] or options[:operation].empty?
+      error("No operation is chosen")
+      return false
+    end
+
+    error("invalid operation #{options[:operation]}") unless [:set_pxe,:simple,:deploy_env,:recorded_env].include?(options[:operation])
+
+    case options[:operation]
+    when :set_pxe
+      if !options[:pxe_profile] or options[:pxe_profile].empty?
+        error("The set_pxe reboot must be used with the -w option")
+        return false
+      end
+    when :recorded_env
+      if !options[:env_name] or options[:env_name].empty?
+        error("An environment must be specified must be with the recorded_env kind of reboot")
+        return false
+      end
+      unless options[:deploy_part]
+        error("A partition number must be specified must be with the recorded_env kind of reboot")
+        return false
+      end
+    end
+
+    if options[:key] and options[:operation] != :deploy_env
+      error("The -k option can be only used with the deploy_env reboot kind")
+      return false
+    end
+
+    if options[:env_name] and options[:operation] != :recorded_env
+      error("The -e option can be only used with the recorded_env reboot kind")
+      return false
+    end
+
+    if options[:env_user] and options[:operation] != :recorded_env
+      error("The -u option can be only used with the recorded_env reboot kind")
+      return false
+    end
+
+    if options[:env_version] and options[:operation] != :recorded_env
+      error("The --env-version option can be only used with the recorded_env reboot kind")
+      return false
+    end
+
+    true
+  end
+
+  def self.prepare(options)
+    params = super(options)
+
+    params[:kind] = options[:operation]
+    params[:level] = options[:level] if options[:level]
+
+    params[:deploy_partition] = options[:deploy_part] if options[:deploy_part]
+    params[:block_device] = options[:block_device] if options[:block_device]
+    params[:timeout_reboot_classical] = options[:reboot_classical_timeout] if options[:reboot_classical_timeout]
+    if options[:pxe_profile]
+      params[:pxe] = {}
+      params[:pxe][:profile] = options[:pxe_profile]
+      params[:pxe][:singularities] = options[:pxe_profile_singularities] if options[:pxe_profile_singularities]
+      params[:pxe][:files] = options[:pxe_files] unless options[:pxe_files].empty?
+    end
+    params[:vlan] = options[:vlan] if options[:vlan]
+    params[:check_destructive] = options[:check_demolishing] if options[:check_demolishing]
+
+    if options[:env_name]
+      username = URI.encode_www_form_component(options[:env_user])
+      envname = URI.encode_www_form_component(options[:env_name])
+      envversion = options[:env_version]
+
+      tmp = {}
+      tmp[:last] = true unless options[:env_version]
+      tmp[:username] = username if username && !username.empty?
+      tmp[:name] = envname if envname && !envname.empty?
+      tmp[:version] = envversion if envversion
+      envs = get2(options,api_path("/",:envs),tmp)
+      error("The environment '#{options[:env_name]}' does not exist") if envs.size <= 0
+      env = envs.first
+
+      params[:environment] = {
+        :user => env['user'],
+        :name => env['name'],
+        :version => env['version'],
+      }
+      add_localfiles(env)
+    end
+
+    # Check if the environment contains local files
+
+    if options[:key]
+      params[:ssh_authorized_keys] = options[:key]
+      add_localfiles(params[:ssh_authorized_keys])
+    end
+
+    # Add the PXE files
+    add_localfiles(options[:pxe_files]) unless options[:pxe_files].empty?
+
+    params
+  end
+end
+
+end
+
+if __FILE__ == $0
+  Kadeploy::KarebootClient.launch()
+end
+

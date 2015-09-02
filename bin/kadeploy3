@@ -1,0 +1,219 @@
+#!/usr/bin/ruby -w
+$:.unshift(ENV['KADEPLOY3_LIBS']) if ENV['KADEPLOY3_LIBS']
+
+Signal.trap("INT") do
+  $stdout.puts "\nSIGINT trapped"
+  Kadeploy::KadeployClient.kill() rescue nil
+  exit!(1)
+end
+
+require 'kadeploy3/client'
+require 'uri'
+
+module Kadeploy
+
+class KadeployClient < ClientWorkflow
+  def self.operation()
+    'Deployment'
+  end
+
+  def self.load_options()
+    global_load_options().merge(
+      {
+        :environment => {},
+        :env_kind => '',
+        :env_desc => {},
+        :env_user => nil,
+        :env_name => '',
+        :env_version => nil, #By default we load the latest version
+        :block_device => nil,
+        :deploy_part => nil,
+        :boot_part => nil,
+        :key => nil,
+        :reformat_tmp => nil,
+        :pxe_profile => nil,
+        :pxe_profile_singularities => nil,
+        :pxe_files => [],
+        :steps => [],
+        :force => false,
+        :disable_kexec => nil,
+        :disable_bootloader_install => nil,
+        :disable_disk_partitioning => nil,
+        :reboot_classical_timeout => nil,
+        :reboot_kexec_timeout => nil,
+        :vlan => nil,
+        :secure => false,
+      }
+    )
+  end
+
+  def self.parse_options()
+    global_parse_options() do |opt,options|
+      opt.separator "General options:"
+      add_opt(opt,"-a", "--env-file ENVFILE", "File containing the environment description") { |f|
+        options[:env_kind] = :anonymous
+        load_envfile(options[:env_desc],f)
+      }
+      parse_block_device(opt,options)
+      add_opt(opt,"-c", "--boot-partition NUMBER", /^\d+$/, "Specify the number of the partition to boot on (use 0 to boot on the MBR)") { |c|
+        options[:boot_part] = c.to_i
+      }
+      parse_env_name(opt,options){ options[:env_kind] = :database }
+      parse_keyfile(opt,options)
+      parse_deploy_part(opt,options)
+      add_opt(opt,"-r", "--reformat-tmp FSTYPE", "Reformat the /tmp partition with the given filesystem type (this filesystem need to be supported by the deployment environment)") { |t|
+        options[:reformat_tmp] = t
+      }
+      parse_env_user(opt,options)
+      parse_vlan(opt,options)
+      parse_pxe_profile(opt,options)
+      parse_pxe_pattern(opt,options)
+      parse_pxe_files(opt,options)
+      parse_env_version(opt,options)
+      opt.separator ""
+      opt.separator "Advanced options:"
+      add_opt(opt,"--no-kexec", "Disable kexec reboots during the deployment process") {
+        options[:disable_kexec] = true
+      }
+      add_opt(opt,"--disable-bootloader-install", "Disable the automatic installation of a bootloader for a Linux based environnment") {
+        options[:disable_bootloader_install] = true
+      }
+      add_opt(opt,"--disable-disk-partitioning", "Disable the disk partitioning") {
+        options[:disable_disk_partitioning] = true
+      }
+      parse_timeout_reboot(opt,options)
+      add_opt(opt,"--reboot-kexec-timeout VALUE", "Overload the default timeout for kexec reboots (a ruby expression can be used, 'n' will be replaced by the number of nodes)") { |t|
+        options[:reboot_kexec_timeout] = t
+      }
+      add_opt(opt,"--force-steps STRING", /^SetDeploymentEnv\|(?:\w+:\d+:\d+,?)+&BroadcastEnv\|(?:\w+:\d+:\d+,?)+&BootNewEnv\|(?:\w+:\d+:\d+,?)+$/,"Undocumented, for administration purpose only") { |s|
+        options[:automata] = {}
+        s.split("&").each do |macrostep|
+          macroname = macrostep.split("|")[0]
+          options[:automata][macroname] = []
+
+          macrostep.split("|")[1].split(",").each do |instance|
+            options[:automata][macroname] << {
+              :name => instance.split(":")[0],
+              :retries => instance.split(":")[1].to_i,
+              :timeout => instance.split(":")[2].to_i,
+            }
+          end
+        end
+      }
+      parse_secure(opt,options)
+    end
+  end
+
+  def self.check_options(options)
+    return false unless super(options)
+
+    error('You must choose an environment') if options[:env_kind].empty?
+
+    if !options[:pxe_files].empty? and !options[:pxe_profile]
+      error('You must define a PXE boot profile if you want to push some files in the PXE repository')
+    end
+
+    true
+  end
+
+  def self.prepare(options)
+    params = super(options)
+
+    params[:environment] = {
+      :kind => options[:env_kind],
+    }
+
+    params[:deploy_partition] = options[:deploy_part] if options[:deploy_part]
+    params[:block_device] = options[:block_device] if options[:block_device]
+    params[:boot_partition] = options[:boot_part] if options[:boot_part]
+    params[:reformat_tmp_partition] = options[:reformat_tmp] if options[:reformat_tmp]
+    params[:timeout_reboot_classical] = options[:reboot_classical_timeout] if options[:reboot_classical_timeout]
+    params[:timeout_reboot_kexec] = options[:reboot_kexec_timeout] if options[:reboot_kexec_timeout]
+    params[:disable_kexec] = options[:disable_kexec] if options[:disable_kexec]
+    params[:disable_bootloader_install] = options[:disable_bootloader_install] if options[:disable_bootloader_install]
+    params[:disable_disk_partitioning] = options[:disable_disk_partitioning] if options[:disable_disk_partitioning]
+    if options[:pxe_profile]
+      params[:pxe] = {}
+      params[:pxe][:profile] = options[:pxe_profile]
+      params[:pxe][:singularities] = options[:pxe_profile_singularities] if options[:pxe_profile_singularities]
+      params[:pxe][:files] = options[:pxe_files] unless options[:pxe_files].empty?
+    end
+    params[:vlan] = options[:vlan] if options[:vlan]
+    params[:automata] = options[:automata] if options[:automata]
+
+
+    env = nil
+    case options[:env_kind]
+    when :database
+      username = URI.encode_www_form_component(options[:env_user])
+      envname = URI.encode_www_form_component(options[:env_name])
+      envversion = options[:env_version]
+
+      tmp = {}
+      tmp[:last] = true unless options[:env_version]
+      tmp[:username] = username if username && !username.empty?
+      tmp[:name] = envname if envname && !envname.empty?
+      tmp[:version] = envversion if envversion
+      envs = get2(options,api_path("/",:envs),tmp)
+      error("The environment '#{options[:env_name]}' does not exist") if envs.size <= 0
+      #if env_user is not defined, own environments are selected if available
+      if options[:env_user].nil?
+        list = envs.select { |e| e["user"] == USER }
+        list = envs if list.empty?
+      else
+        list = envs
+      end
+      #List should not have a size > 1 when only one user is allowed to publish public environments
+      env = list.first
+
+      params[:environment][:user] = env['user']
+      params[:environment][:name] = env['name']
+      params[:environment][:version] = env['version']
+
+      warn = false
+      warn = true if localfile?(env['image']['file'])
+      warn = true if !warn and env['preinstall'] and localfile?(env['preinstall']['archive'])
+      if !warn and env['postinstalls'] and !env['postinstalls'].empty?
+        env['postinstalls'].each do |postinstall|
+          if localfile?(postinstall['archive'])
+            warn = true
+            break
+          end
+        end
+      end
+
+      if warn and options[:chosen_server] != 'default' and options[:chosen_server] != options[:servers]['default']
+        debug("Warning: deploying a recorded environment that depends on locally stored files on a remote server") if warn
+      end
+
+      if warn and options[:multi_server]
+        debug("Warning: deploying a recorded environment that depends on locally stored files on muli servers") if warn
+      end
+    when :anonymous
+      params[:environment].merge!(options[:env_desc])
+      env = options[:env_desc]
+    else
+      raise
+    end
+
+    # Check if the environment contains local files
+    add_localfiles(env)
+
+    # Add the authorized_keys file
+    if options[:key]
+      params[:ssh_authorized_keys] = options[:key]
+      add_localfiles(params[:ssh_authorized_keys])
+    end
+
+    # Add the PXE files
+    add_localfiles(options[:pxe_files]) unless options[:pxe_files].empty?
+
+    params
+  end
+end
+
+end
+
+if __FILE__ == $0
+  Kadeploy::KadeployClient.launch()
+end

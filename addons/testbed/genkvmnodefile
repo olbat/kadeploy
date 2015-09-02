@@ -1,0 +1,270 @@
+#!/usr/bin/ruby
+
+require 'ipaddr'
+require 'resolv'
+require 'optparse'
+require 'yaml'
+
+USAGE = "Usage: #{$0} [options] <yaml_networkfile>\n"
+
+NODENB = 4
+NODENAME_PREFIX = 'node-'
+MACADDR_START_VAL = '00:16:3E:00:00:00'
+
+MONITOR_PORT_START_VAL = 25301
+
+MACADDR_LENGTH = 12
+MACADDR_GR_SEP = ':'
+
+def int2mac(value)
+  tmp = value.to_s(16)
+  tmp.insert(0,(tmp.length >= MACADDR_LENGTH ? '' : '0' * (MACADDR_LENGTH - tmp.length)))
+  (MACADDR_LENGTH/2 - 1).times { |i| tmp.insert((i+1)*2 + i,MACADDR_GR_SEP) }
+  tmp.upcase
+end
+
+def mac2int(value)
+  value.gsub(MACADDR_GR_SEP,'').to_i(16)
+end
+
+def ipv42int(value)
+  iter=3
+  ret=0
+  tmp = value.split('.').collect do |i|
+    ret |= (i.to_i << 8*iter)
+    iter -= 1
+  end
+  ret
+end
+
+def int2ipv4(value)
+  tmp = []
+  3.downto(0) do |i|
+    tmp << ((value >> 8*i) & 255)
+  end
+  tmp.join('.')
+end
+
+$network = nil
+$sites = {}
+$hosts = []
+
+options = {}
+
+options[:host_list] = nil
+
+optparse = OptionParser.new(USAGE) do |opts|
+	opts.on( '-h', '--help', 'Display this screen' ) do
+  		puts opts
+  		exit
+	end
+
+	opts.on( '-f', '--host-list <nodelist_file>', 'Specify a file containing the list of hosts' ) do |h|
+  	options[:host_list] = h
+	end
+
+	opts.on( '-e', '--exclude-list <nodelist_file>', 'Specify a file containing a list of nodes that IP should be excluded from the pool of IPs used for the VMs' ) do |h|
+  	options[:excl_list] = h
+	end
+
+	opts.on( '-m', '--addr-list <addrlist_file>', 'Specify a file containing the list of ip/macs association' ) do |h|
+  options[:addr_list] = h
+	end
+end
+
+begin
+  optparse.parse!
+rescue OptionParser::InvalidOption => e
+  $stderr.puts e.to_s
+  exit 1
+end
+
+if ARGV.size < 1
+  $stderr.puts USAGE
+  exit 1
+end
+
+begin
+  struct = YAML.load_file(ARGV[0])
+  if struct['network']
+    begin
+      $network = IPAddr.new(struct['network'])
+    rescue ArgumentError
+      $stderr.puts "invalid network '#{struct['network']}'"
+      exit 1
+    end
+  else
+    $stderr.puts 'cannot find \'network\' field in YAML file'
+    exit 1
+  end
+
+  if struct['subnetworks'] and struct['subnetworks'].is_a?(Array)
+    struct['subnetworks'].each do |subnet|
+      name = subnet['name']
+      if $sites[name]
+        $stderr.puts "multiple definition of site '#{name}', ignoring"
+      else
+        $sites[name] = {}
+        $sites[name][:addr] = IPAddr.new(subnet['address'])
+        $sites[name][:iterip] = ipv42int($sites[name][:addr].to_range.first.succ.to_s)
+      end
+    end
+  else
+    $stderr.puts 'cannot find \'subnetwork\' field in YAML file'
+    exit 1
+  end
+rescue ArgumentError
+  $stderr.puts "invalid ip #{subnet['address']}"
+  exit 1
+rescue Errno::ENOENT
+  $stderr.puts "File '#{ARGV[0]}' not found"
+  exit 1
+end
+
+
+if options[:host_list]
+  hostlist_file = options[:host_list]
+elsif (ENV['GOOD_NODES'])
+  hostlist_file = ENV['GOOD_NODES']
+elsif (ENV['OAR_NODEFILE'])
+  hostlist_file = ENV['OAR_NODEFILE']
+else
+  $stderr.puts "hostlist parameter not set (see -f option)"
+  exit 1
+end
+
+hostlist = []
+begin
+  hostlist = YAML.load_file(hostlist_file)
+rescue Errno::ENOENT
+	$stderr.puts "File '#{nodelist_file}' not found"
+  exit 1
+end
+
+excllist = []
+if options[:excl_list]
+  begin
+    File.open(options[:excl_list] , 'r') do |f|
+      f.each do |line|
+        excllist << line.strip unless excllist.include?(line.strip)
+      end
+    end
+  rescue Errno::ENOENT
+    $stderr.puts "File '#{excllist_file}' not found"
+    exit 1
+  end
+end
+
+addrlist = {}
+if options[:addr_list]
+  begin
+    File.open(options[:addr_list] , 'r') do |f|
+      f.each do |line|
+        tmp = line.strip.split(/\s+/,2)
+        addrlist[ipv42int(tmp[0])] = mac2int(tmp[1])
+      end
+    end
+  rescue Errno::ENOENT
+    $stderr.puts "File '#{options[:addr_list]}' not found"
+    exit 1
+  end
+end
+
+tmp = $network.to_range
+exclips = [
+  ipv42int(tmp.first.to_s),
+  ipv42int(tmp.last.to_s)-1,
+  ipv42int(tmp.last.to_s)
+]
+
+excllist.each do |host|
+  begin
+    hostname = host
+    hostip = Resolv.getaddress(hostname)
+    tmp = ipv42int(hostip)
+    unless $network.include?(IPAddr.new(hostip))
+      $stderr.puts "host IP of '#{host}' (#{hostip}) not included in network #{$network.to_s}"
+      exit 1
+    end
+
+    exclips << tmp
+  rescue
+    $stderr.puts "invalid address '#{hostname}'"
+    exit 1
+  end
+end
+
+hostlist.each_pair do |host,nbnodes|
+  begin
+    hostname = host
+    hostip = Resolv.getaddress(hostname)
+    tmp = ipv42int(hostip)
+
+    affected = false
+    site = nil
+    $sites.each_pair do |name,val|
+      if hostname.include?(name)
+        site = name
+        affected = true
+      end
+    end
+
+    unless affected
+      $stderr.puts "no sites matching with '#{hostname}' hostname, using a random one"
+      site = $sites.keys[rand($sites.keys.size)]
+    end
+
+    $hosts << {
+      :hostname => hostname,
+      :site => $sites[site],
+      :ipv4str => hostip,
+      :ipv4int => tmp,
+      :nbnodes => nbnodes,
+    }
+    exclips << tmp
+  rescue
+    $stderr.puts "invalid address '#{hostname}'"
+    exit 1
+  end
+end
+
+if $hosts.empty?
+  $stderr.puts "hostlist parameter empty"
+  exit 1
+end
+
+
+itermac = mac2int(MACADDR_START_VAL)
+exclmacs = []
+count=1
+$hosts.each do |host|
+  iters = host[:nbnodes]
+  port = MONITOR_PORT_START_VAL
+  while iters > 0 do
+    if !exclips.include?(host[:site][:iterip])
+      unless addrlist.empty?
+        unless mac = addrlist[host[:site][:iterip]]
+          mac = itermac
+        end
+        if exclmacs.include?(mac)
+          mac = itermac
+          begin
+            mac += 1
+          end while exclmacs.include?(mac)
+          itermac = mac
+        end
+      else
+        mac = itermac
+      end
+      exclmacs << mac
+
+      puts "#{NODENAME_PREFIX}#{count} #{int2ipv4(host[:site][:iterip])} #{int2mac(mac)} #{host[:ipv4str]} #{port}"
+      count += 1
+      port += 1
+      itermac += 1
+      iters -= 1
+    end
+
+    host[:site][:iterip] += 1
+  end
+end

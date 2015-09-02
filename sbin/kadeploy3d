@@ -1,0 +1,355 @@
+#!/usr/bin/ruby -w
+
+
+# Necessary to force the Debian's ruby-mysql library to return UTF-8 encoded strings
+# We disable the warning message here.
+warn_level = $VERBOSE
+$VERBOSE = nil
+Encoding.default_external = Encoding::UTF_8 if RUBY_VERSION >= '1.9'
+$VERBOSE = warn_level
+
+$:.unshift(ENV['KADEPLOY3_LIBS']) if ENV['KADEPLOY3_LIBS']
+$kadeploy_logdir=ENV['KADEPLOY3_LOG_DIR']||'/var/log/kadeploy3'
+$kadeploy_rundir=ENV['KADEPLOY3_RUN_DIR']||'/var/run/kadeploy3d'
+$kadeploy_confdir=ENV['KADEPLOY3_CONFIG_DIR']||'/etc/kadeploy3'
+$kadeploy_logfiles = {}
+
+LOGFILE_DEBUG='output.log'
+LOGFILE_ERROR='error.log'
+RUNFILE_RELOAD='reload'
+
+AUTOCLEAN_PITCH = 300
+
+$version = nil
+$autoclean = nil
+$kadeploy = nil
+$httpd = nil
+$mainthread = nil
+$ssh_key = nil
+
+def sigtrap_exit(sig)
+  th = Thread.new do
+    puts "\n#{sig} trapped, let's clean everything ..."
+    $kadeploy.shutdown = true if $kadeploy
+    $autoclean.kill() if $autoclean
+    $kadeploy.kill() if $kadeploy
+    $mainthread.kill() if $mainthread
+    $httpd.kill() if $httpd
+    exit 1
+  end
+  th.join()
+end
+
+Signal::trap("INT") do
+  sigtrap_exit("INT")
+end
+
+Signal::trap("TERM") do
+  sigtrap_exit("TERM")
+end
+
+#require 'stringio'
+
+# Reload the service & logfiles rotation (syslogd)
+Signal::trap("HUP") do
+  th = Thread.new do
+    $stdout.puts "[#{Time.now}] HUP Received, reopening logs and reloading configuration."
+    $stdout.flush
+    # The launcher will read the file RUNFILE_RELOAD to know if the reload operation was successful
+    # In this file, the first line is the return code (0 if successfull)
+    # The following lines are representing the error message if there is an error
+    stderr = $stderr
+    $stderr = StringIO.new
+    # The config parser writes error messages on $stderr, since we want to
+    # write the return code as the first line of the reload file, and since
+    # to know if there is an error or not we have to launch the config parser,
+    # we cant redirect $stderr to the reload file directly
+    # That's why we are using a StringIO object in order to be able to store the
+    # error message that are written on $stderr and then write this message in the
+    # reload file AFTER the return code
+
+    $kadeploy_logfiles.each_value do |io|
+      if io
+        filename = File.readlink(File.join("/proc/self/fd/#{io.fileno}"))
+        io.reopen(filename,'a+')
+      end
+    end
+    file = File.open(File.join($kadeploy_rundir,RUNFILE_RELOAD),'w+')
+    begin
+#      Hot relead is disabled.
+#      STDOUT.puts "[#{Time.now.to_s}] Reloading configuration files"
+#      $kadeploy.reload_config()
+#      file.puts '0'
+    rescue Exception => e
+      STDERR.puts "[#{Time.now.to_s}] Failed to reload configuration files !"
+      if e.is_a?(Kadeploy::KadeployError)
+        file.puts '1'
+        error("#{Kadeploy::KadeployError.to_msg(e.errno)}"\
+          "#{(e.message and !e.message.empty? ? ': ' + e.message : '')}",false)
+      else
+        file.puts '2'
+        error(e.message,false)
+      end
+      file.write($stderr.string)
+    ensure
+      file.close unless file.closed?
+      $stderr.close unless $stderr.closed?
+      $stderr = stderr
+    end
+  end
+  th.join
+end
+
+
+# Print a dump of the running service data structures
+Signal::trap("USR1") do
+  Thread.new do
+    begin
+      require 'kadeploy3/server/dump'
+      STDERR.puts "[#{Time.now.to_s}] Dump internal structures"
+      Kadeploy.dump
+    rescue Exception => e
+      STDERR.puts e.class.name
+      STDERR.puts e.message
+      STDERR.puts e.backtrace
+    end
+  end
+end
+
+require 'thread'
+
+# code snippet coming from
+# http://itreallymatters.net/post/29549982905/generating-thread-dumps-for-ruby-scripts
+Signal::trap('USR2') do
+  if RUBY_VERSION =~ /^1\.8\./
+    STDERR.puts "== Current thread: #{Thread.inspect} =="
+    STDERR.puts caller.join("\n    \\_ ")
+  else
+    Thread.list.each do |thread|
+      t=Time.now
+      STDERR.puts "[#{t}]========= Thread #{thread.object_id.to_s} =========="
+      bt = thread.backtrace
+      STDERR.puts "[#{t}] #{bt ? bt.join("\n[#{t}]    \\_ ") : "Thread has no backtrace, its status is: #{thread.status}"}"
+      STDERR.puts "[#{t}]================= END ================="
+    end
+  end
+  STDERR.flush
+end
+
+require 'kadeploy3/server'
+
+require 'fileutils'
+require 'json'
+require 'optparse'
+
+
+def clean()
+  begin
+    File.delete($pidfile) if $pidfile
+    $pidfile = nil
+  rescue Exception
+  end
+
+  if $ssh_key
+    $stdout.puts("Killing ssh-agent")
+    `ssh-agent -k`
+    $ssh_key = nil
+  end
+
+  $kadeploy_logfiles.each_value do |io|
+    io.close if io and !io.closed?
+  end
+  STDIN::reopen('/dev/null')
+  STDOUT::reopen('/dev/null')
+  STDERR::reopen('/dev/null')
+end
+
+at_exit{ clean() }
+
+def error(msg='',abrt = true)
+  $stderr.puts msg if msg and !msg.empty?
+  clean() if abrt
+  exit 1 if abrt
+end
+
+$pidfile = nil
+$detach = false
+$redirect_stdin = true
+$redirect_stdout = true
+$redirect_stderr = true
+$generate_dh_seeds = true
+
+
+# Parse options
+OptionParser.new do |opts|
+  opts.banner = "Usage: #{$0} [options]\n!!! Be careful, the daemon is not launched as root !!!"
+
+  opts.on("-p", "--pidfile FILE", "Write the pid of the daemon process in a file") do |p|
+    $pidfile = p
+  end
+
+  opts.on("-d", "--detach", "Run the application in background") do
+    $detach = true
+  end
+
+  opts.on("-I", "--no-stdin-pipe", "Do not pipe /dev/null to stdin") do
+    $redirect_stdin = false
+  end
+
+  opts.on("-O", "--no-stdout-redirect", "Do not redirect stdout to a logfile") do
+    $redirect_stdout = false
+  end
+
+  opts.on("-E", "--no-stderr-redirect", "Do not redirect stderr to a logfile") do
+    $redirect_stderr = false
+  end
+
+  opts.on("-S", "--no-dh-seeds", "Do not generate seeds for DH algorithm (use default ones)") do
+    $generate_dh_seeds = false
+  end
+
+  opts.on("--ruby-debug", "Run with ruby interpreter's debug mode") do
+    $DEBUG = true
+  end
+
+  opts.on("-v", "--version", "Display the version of the service") do
+    $version = true
+  end
+end.parse!
+
+if $version
+  if ENV['KADEPLOY3_VERSION']
+    $stdout.puts ENV['KADEPLOY3_VERSION']
+    exit 0
+  else
+    version_file = File.join($kadeploy_confdir,'version')
+    if File.readable?(version_file)
+      $stdout.puts File.read(version_file).strip
+      exit 0
+    else
+      $stderr.puts "cannot read the file '#{version_file}'"
+      exit 1
+    end
+  end
+end
+
+
+# Check logs directory
+if !File.directory?($kadeploy_logdir)
+  error("Log directory '#{$kadeploy_logdir}' does not exists")
+end
+
+if (!File.writable?(File.join($kadeploy_logdir,LOGFILE_DEBUG)) \
+    or !File.writable?(File.join($kadeploy_logdir,LOGFILE_ERROR))) \
+  and !File.writable?($kadeploy_logdir)
+  error("Log directory '#{$kadeploy_logdir}' not writable")
+end
+
+# Disable reverse lookup to prevent lag in case of DNS failure
+Socket::do_not_reverse_lookup = true
+
+$stdout.puts ''
+# Load the configuration
+begin
+  $kadeploy = Kadeploy::KadeployServer.new()
+rescue Kadeploy::KadeployError => ke
+  error("#{Kadeploy::KadeployError.to_msg(ke.errno)}"\
+    "#{(ke.message and !ke.message.empty? ? ': ' + ke.message : '')}")
+end
+$stdout.puts 'Configuration files loaded'
+$ssh_key=$kadeploy.ssh_private_key
+
+# Loading SSH agent
+
+#Normaly, it was checked by conf
+error("Unable to read the SSH key file '#{$ssh_key}'") unless File.readable?($ssh_key)
+
+if $ssh_key
+  tmp=`ssh-agent -s`
+  error('Unable to run ssh-agent') unless $?.success?
+  $ssh_agent_pid =tmp[/SSH_AGENT_PID=(\d+);/,1]
+  $ssh_agent_sock = tmp[/SSH_AUTH_SOCK=(.+?);/,1]
+  ENV['SSH_AGENT_PID'] = $ssh_agent_pid
+  ENV['SSH_AUTH_SOCK'] = $ssh_agent_sock
+  `ssh-add #{$ssh_key} 2>/dev/null`
+  error('Unable to add the key to the ssh-agent') unless $?.success?
+  $stdout.puts "SSH-agent #{$ssh_agent_pid} loaded"
+end
+
+dh_seeds = nil
+if $kadeploy.secure and $generate_dh_seeds
+  $stdout.puts 'Generate seeds for DH algorithm'
+  dh_seeds = {
+    512 => OpenSSL::PKey::DH.new(512),
+    1024 => OpenSSL::PKey::DH.new(1024),
+  }
+end
+
+# Prepare to launch HTTPd
+begin
+  $stderr = $stdout
+  $httpd = Kadeploy::HTTPd::Server.new($kadeploy.host,$kadeploy.port,
+    $kadeploy.secure,$kadeploy.local,$kadeploy.cert,$kadeploy.private_key,
+    dh_seeds)
+  $stderr = STDERR
+
+  $kadeploy_logfiles[:httpd] = $httpd.logs[:httpd]
+  $kadeploy_logfiles[:access] = $httpd.logs[:access]
+
+rescue Errno::EADDRINUSE
+  error("Another service is listening on the port #{$kadeploy.port}")
+  exit 1
+end
+
+
+# Configure HTTPd bindings
+$kadeploy.config_httpd_bindings($httpd)
+
+
+# Demonize the process
+if $detach
+  #exit! avoids call at_exit which kills the ssh-agent and another stuff.
+  exit! 0 if fork
+  Process::setsid
+end
+
+# Pipe /dev/null to stdin
+STDIN::reopen('/dev/null') if $redirect_stdin
+
+# Redirecting outputs to logfiles
+if $redirect_stdout
+  STDOUT::reopen(File.join($kadeploy_logdir,LOGFILE_DEBUG), 'a+')
+  STDOUT::sync = true
+  $kadeploy_logfiles[:debug] = STDOUT
+end
+$stdout = STDOUT
+
+if $redirect_stderr
+  STDERR::reopen(File.join($kadeploy_logdir,LOGFILE_ERROR), 'a+')
+  #STDOUT::sync = true
+  $kadeploy_logfiles[:error] = STDERR
+end
+$stderr = STDERR
+
+begin
+  File.open($pidfile,'w'){|f| f.puts Process::pid} if $pidfile
+
+  $stdout.puts "[#{Time.now.to_s}] Launching service"
+
+  # Launch autoclean thread
+  $autoclean = Thread.new do
+    begin
+      sleep AUTOCLEAN_PITCH
+      $kadeploy.workflows_clean()
+    end while true
+  end
+
+  GC.start
+
+  # Launch HTTPd
+  $mainthread = Thread.new{$httpd.run()}
+  $mainthread.join
+  clean()
+ensure
+  File.delete($pidfile) if $pidfile
+end

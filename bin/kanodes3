@@ -1,0 +1,127 @@
+#!/usr/bin/ruby -w
+$:.unshift(ENV['KADEPLOY3_LIBS']) if ENV['KADEPLOY3_LIBS']
+
+Signal.trap("INT") do
+  $stdout.puts "\nSIGINT trapped"
+  Kadeploy::KanodesClient.kill() rescue nil
+  exit!(1)
+end
+
+require 'kadeploy3/client'
+
+module Kadeploy
+
+class KanodesClient < Client
+  def self.operation()
+    'Nodes statistics'
+  end
+
+  def self.load_options()
+    global_load_options().merge(
+      {
+        :operation => nil,
+        :user => nil,
+        :wid => nil,
+      }
+    )
+  end
+
+  def self.parse_options()
+    global_parse_options() do |opt,options|
+      opt.separator "General options:"
+      add_opt(opt,"-s", "--get-nodes-state", "Get the deployment state of the nodes") {
+        options[:operation] = :get_state
+      }
+      add_opt(opt,"-d", "--get-deployments-status", "Get the status of running deployments") {
+        options[:operation] = :get_status_deploy
+      }
+      add_opt(opt,"-r", "--get-reboots-status", "Get the status of running reboot operations") {
+        options[:operation] = :get_status_reboot
+      }
+      add_opt(opt,"-p", "--get-powers-status", "Get the status of running power operations") {
+        options[:operation] = :get_status_power
+      }
+      add_opt(opt,"-c", "--get-consoles-status", "Get the status of open consoles") {
+        options[:operation] = :get_status_console
+      }
+      add_opt(opt,"-a", "--get-all-status", "Get the status of all running operations") {
+        options[:operation] = :get_status_all
+      }
+      parse_machinefile(opt,options)
+      parse_machine(opt,options)
+      add_opt(opt,"-w", "--workflow-id WID", "Specify a workflow id (to be used with the get_status option). If no wid is specified, the information of all the running deployments will be returned.") { |w|
+        options[:wid] = w
+      }
+    end
+  end
+
+  def self.check_options(options)
+    unless [:get_state,:get_status_deploy,:get_status_reboot,:get_status_power,:get_status_console,:get_status_all].include?(options[:operation])
+      error("You must choose an operation")
+      return false
+    end
+
+    case options[:operation]
+    when :get_status_deploy,:get_status_reboot,:get_status_power,:get_status_console,:get_status_all
+      if !options[:nodes].empty?
+        error('Node list is useless when gathering deployment statuses')
+        return false
+      end
+    when :get_state
+      if options[:wid]
+        error('Workflow ID is useless when gathering node\'s deployment states')
+        return false
+      end
+    end
+    true
+  end
+
+  #def self.prepare(options)
+  #end
+
+  def run(options,params)
+    params[:nodes] = nodes() if nodes()
+    path = nil
+
+    case options[:operation]
+    when :get_state
+      path = api_path()
+    when :get_status_deploy
+      path = api_path(options[:wid],:deploy)
+    when :get_status_reboot
+      path = api_path(options[:wid],:reboot)
+    when :get_status_power
+      path = api_path(options[:wid],:power)
+    when :get_status_console
+      path = api_path(options[:wid],:console)
+    when :get_status_all
+      path = []
+      path << api_path(options[:wid],:deploy)
+      path << api_path(options[:wid],:reboot)
+      path << api_path(options[:wid],:power)
+      path << api_path(options[:wid],:console)
+    else
+      raise
+    end
+
+    if path.is_a?(Array)
+      ret = []
+      path.each do |p|
+        ret += get(p,params)
+      end
+      ret.to_yaml
+    else
+      get(path,params,:yaml,false)
+    end
+  end
+
+  def result(options,ret)
+    debug ret if ret
+  end
+end
+
+end
+
+if __FILE__ == $0
+  Kadeploy::KanodesClient.launch()
+end

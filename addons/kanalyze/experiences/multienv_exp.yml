@@ -1,0 +1,38 @@
+---
+- name: Kadeploy316
+  times: 30
+  environments:
+    - debian-min
+  macrosteps:
+    SetDeploymentEnv:
+      type: Untrusted
+      timeout: 300
+      retries: 0
+    BroadcastEnv:
+      type: Kastafior
+      timeout: 200
+      retries: 0
+    BootNewEnv:
+      type: Kexec
+      timeout: 200
+      retries: 0
+
+- name: Kadeploy317
+  times: 30
+  environments:
+    - debian-min
+  macrosteps:
+    SetDeploymentEnv:
+      type: Untrusted
+      timeout: 300
+      retries: 0
+    BroadcastEnv:
+      type: Kastafior
+      timeout: 300
+      retries: 0
+    BootNewEnv:
+      type: Kexec
+      timeout: 300
+      retries: 0
+
+

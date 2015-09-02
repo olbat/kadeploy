@@ -1,0 +1,341 @@
+#!/usr/bin/ruby -w
+$:.unshift(ENV['KADEPLOY3_LIBS']) if ENV['KADEPLOY3_LIBS']
+
+Signal.trap("INT") do
+  $stdout.puts "\nSIGINT trapped"
+  Kadeploy::KaenvClient.kill() rescue nil
+  exit!(1)
+end
+
+require 'kadeploy3/client'
+require 'uri'
+
+module Kadeploy
+
+class KaenvsClient < Client
+  def print_headers()
+    debug sprintf("%-21s %-7s %-11s %.35s\n",'Name','Version','User','Description')
+    debug sprintf("%-21s %-7s %-11s %.35s\n",'####','#######','####','###########')
+  end
+
+  def print_short(env)
+    tot = 0
+    tot += (env['name'].size > 21 ? env['name'].size : 21)
+
+    format = "%-21s "
+    tmp = env['name'].size - 21
+    if tmp > 0
+      if tmp < 7
+        format << "%-#{7-tmp}s "
+        tot += (7-tmp)
+      else
+        format << "%s "
+        tot += env['version'].size
+      end
+    else
+      format << "%-7s "
+      tot += 7
+    end
+
+    format << "%-11s "
+    tot += (env['user'].size > 11 ? env['user'].size : 11)
+
+    tot += 3
+
+    if env['description'].size > (80-tot)
+      format << "%.#{80-tot-3}s...\n"
+    else
+      format << "%.#{80-tot}s\n"
+    end
+    debug sprintf(format,env['name'],env['version'],env['user'],env['description'])
+  end
+
+  def print_full(env)
+    env.delete('user')
+    debug env.to_yaml
+    #YAML::quick_emit(env) do |out|
+    #  out.map(env.taguri(), env.to_yaml_style()) do |map|
+    #    env.keys.sort do |x,y|
+    #      tmpx = YAML_SORT.index(x)
+    #      tmpy = YAML_SORT.index(y)
+    #      tmpx,tmpy = [x.to_s,y.to_s] if !tmpx and !tmpy
+    #      (tmpx || max+1) <=> (tmpy || max+2)
+    #    end.each{ |k| map.add(k, env[k]) }
+    #    #content_hash.sort_by { |k,v| k }.each{ |t| map.add(t[0],t[1]) }
+    #    #content_hash.keys.sort.each { |k| map.add(k, content_hash[k]) }
+    #  end
+    #end
+  end
+
+  def self.operation()
+    'Environment management'
+  end
+
+  def self.load_options()
+    global_load_options().merge(
+      {
+        :environment => {},
+        :operation => nil,
+        :env_desc => {},
+        :env_user => nil,
+        :env_name => '',
+        :env_version => nil,
+        :all_versions => false,
+        :visibility_tag => nil,
+        :files_to_move => {},
+        :secure => false,
+      }
+    )
+  end
+
+  def self.parse_options()
+    global_parse_options() do |opt,options|
+      opt.separator "General options:"
+      add_opt(opt,"-a", "--add ENVFILE", "Add an environment") { |f|
+        options[:operation] = :add
+        load_envfile(options[:env_desc],f)
+      }
+      add_opt(opt,"-d", "--delete ENVNAME", "Delete an environment") { |n|
+        options[:env_name] = n
+        options[:operation] = :delete
+      }
+      add_opt(opt,"-l", "--list [ENVNAME]", "List environments with the environment name pattern (% is the wildcard).") { |n|
+        options[:operation] = :list
+        options[:env_name] = n if n
+      }
+      add_opt(opt,"-m", "--files-to-move FILES", "Files to move (src1::dst1,src2::dst2,...)") { |f|
+        if /\A.+::.+(,.+::.+)*\Z/ =~f then
+          f.split(",").each do |src_dst|
+            tmp = src_dst.split("::",2)
+            options[:files_to_move][tmp[0]] = tmp[1]
+          end
+        else
+          error("Invalid synthax for files to move")
+          return false
+        end
+      }
+      add_opt(opt,"-p", "--print ENVNAME", "Print an environment") { |n|
+        options[:env_name] = n
+        options[:operation] = :print
+      }
+      add_opt(opt,"-s", "--all-versions", "Apply the operation on all the versions of the environment") {
+        options[:all_versions] = true
+      }
+      add_opt(opt,"-t", "--visibility-tag TAG", ['public','private','shared'], "Set the visibility tag (private, shared, public)") { |v|
+        options[:visibility_tag] = v
+      }
+      parse_env_user(opt,options)
+      parse_env_version(opt,options)
+      opt.separator ""
+      opt.separator "Advanced options:"
+      add_opt(opt,"--toggle-destructive-tag ENVNAME", "Toggle the destructive tag on an environment") { |n|
+        options[:env_name] = n
+        options[:operation] = :'toggle-destructive-tag'
+      }
+      add_opt(opt,"--set-visibility-tag ENVNAME", "Set the visibility tag on an environment") { |n|
+        options[:env_name] = n
+        options[:operation] = :'set-visibility-tag'
+      }
+      add_opt(opt,"--update-image-checksum ENVNAME", "Update the checksum of the environment image") { |n|
+        options[:env_name] = n
+        options[:operation] = :'update-image-checksum'
+      }
+      add_opt(opt,"--update-preinstall-checksum ENVNAME", "Update the checksum of the environment preinstall") { |n|
+        options[:env_name] = n
+        options[:operation] = :'update-preinstall-checksum'
+      }
+      add_opt(opt,"--update-postinstalls-checksum ENVNAME", "Update the checksum of the environment postinstalls") { |n|
+        options[:env_name] = n
+        options[:operation] = :'update-postinstalls-checksum'
+      }
+      add_opt(opt,"--move-files", "Move the files of the environments (for administrators only)") { |n|
+        options[:operation] = :'move-files'
+      }
+      parse_secure(opt,options)
+    end
+  end
+
+  def self.check_options(options)
+    case options[:operation]
+    when :add
+      if options[:env_desc].empty?
+        error("You must choose a file that contains the environment description")
+        return false
+      end
+    when :list
+
+    when :delete, :print, :'update-image-checksum', :'update-preinstall-checksum', :'update-postinstalls-checksum', :'toggle-destructive-tag'
+      if options[:env_name].empty?
+        error("You must choose an environment")
+        return false
+      end
+    when :'set-visibility-tag'
+      if options[:env_name].empty?
+        error("You must choose an environment")
+        return false
+      end
+      if options[:visibility_tag].empty?
+        error("You must define the visibility value")
+        return false
+      end
+    when :'move-files'
+      if options[:files_to_move].empty?
+        error("You must define some files to move")
+        return false
+      end
+    else
+      error("You must choose an operation")
+      return false
+    end
+
+    return true
+  end
+
+  def self.prepare(options)
+    params = super(options)
+
+    if [:add, :'update-image-checksum',:'update-postinstalls-checksum',:'update-preinstall-checksum',:'move-files'].include?(options[:operation])
+      # Check if the environment contains local files
+      desc = nil
+      case options[:operation]
+      when :add
+        desc = options[:env_desc]
+      when :'move-files'
+        desc = options[:files_to_move].values
+      else
+        username = URI.encode_www_form_component(options[:env_user])
+        envname = URI.encode_www_form_component(options[:env_name])
+        envversion = options[:env_version]
+        tmp = params.dup
+        tmp[:last] = true unless options[:env_version]
+        tmp[:username] = username if username && !username.empty?
+        tmp[:name] = envname if envname && !envname.empty?
+        tmp[:version] = envversion if envversion && !envversion.nil?
+        envs = get2(options,api_path("/",:envs),tmp)
+        error("The environment '#{envname}' does not exist") if envs.size <= 0
+        desc = envs.first
+      end
+      add_localfiles(desc)
+
+      # Serve local files throught HTTP(s)
+      params[:client] = http_export_files(options[:secure]) unless $files.empty?
+    end
+
+    case options[:operation]
+      when :add
+        params[:environment] = options[:env_desc]
+      when :'update-image-checksum'
+        params[:update_image_checksum] = true
+      when :'update-postinstalls-checksum'
+        params[:update_postinstalls_checksum] = true
+      when :'update-preinstall-checksum'
+        params[:update_preinstall_checksum] = true
+      when :'set-visibility-tag'
+        params[:visibility] = options[:visibility_tag]
+      when :'toggle-destructive-tag'
+        params[:toggle_destructive] = true
+      when :'move-files'
+        params[:update_files] = options[:files_to_move]
+    end
+
+    params[:last] = true unless options[:all_versions]
+
+    params
+  end
+
+  def run(options,params)
+    # set path
+    path = api_path()
+
+    if ![:add, :'move-files'].include?(options[:operation])
+      if [:print,:list].include?(options[:operation])
+        if options[:env_user] && !options[:env_user].empty?
+          params[:username] = options[:env_user]
+        end
+        params[:version]  = options[:env_version] if options[:env_version]
+        params[:name]  = options[:env_name] if options[:env_name] && !options[:env_name].empty?
+      else
+        path = File.join(path,URI.encode_www_form_component(options[:env_user]||USER))
+        path = File.join(path,URI.encode_www_form_component(options[:env_name])) if options[:env_name]
+        path = File.join(path,options[:env_version].to_s) if options[:env_version]
+      end
+    end
+
+    method = nil
+
+    case options[:operation]
+      when :add
+        method = :POST
+      when :list
+        method = :GET
+      when :delete
+        method = :DELETE
+      when :print
+        method = :GET
+      when :'update-image-checksum'
+        method = :PUT
+      when :'update-postinstalls-checksum'
+        method = :PUT
+      when :'update-preinstall-checksum'
+        method = :PUT
+      when :'set-visibility-tag'
+        method = :PUT
+      when :'toggle-destructive-tag'
+        method = :PUT
+      when :'move-files'
+        method = :PUT
+      else
+        raise
+    end
+
+    case method
+      when :GET
+        get(path,params)
+      when :POST
+        post(path,params)
+      when :PUT
+        put(path,params)
+      when :DELETE
+        delete(path,params)
+      else
+        raise
+    end
+  end
+
+  def result(options,ret)
+    case options[:operation]
+    when :list
+      if ret.empty?
+        debug 'No environment has been found'
+      else
+        print_headers()
+        ret.each do |env|
+          print_short(env)
+        end
+      end
+    when :print
+      if ret.empty?
+        debug 'No environment has been found'
+      else
+        #if env_user is not defined, own environments are selected if available
+        if options[:env_user].nil?
+          list = ret.select { |e| e["user"] == USER }
+          list = ret if list.empty?
+        else
+          list = ret
+        end
+        list.each do |env|
+          print_full(env)
+        end
+      end
+    when :'move-files'
+      ret.each{|env| debug "#{env['name']} v#{env['version']}"}
+    end
+  end
+end
+
+end
+
+if __FILE__ == $0
+  Kadeploy::KaenvsClient.launch()
+end

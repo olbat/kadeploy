@@ -1,0 +1,153 @@
+#!/usr/bin/ruby -w
+$:.unshift(ENV['KADEPLOY3_LIBS']) if ENV['KADEPLOY3_LIBS']
+
+Signal.trap("INT") do
+  $stdout.puts "\nSIGINT trapped"
+  Kadeploy::KarightsClient.kill() rescue nil
+  exit!(1)
+end
+
+require 'kadeploy3/client'
+
+module Kadeploy
+
+class KarightsClient < Client
+  def print_headers()
+    debug sprintf("%-15s %-41s %s\n",'User','Node','Partitions')
+    debug sprintf("%-15s %-41s %s\n",'####','####','##########')
+  end
+
+  def print_rights(user,node,parts)
+    debug sprintf("%-15s %-41s %s\n", user, node, parts.join(','))
+  end
+
+  def self.operation()
+    'Rights management'
+  end
+
+  def self.load_options()
+    global_load_options().merge(
+      {
+        :operation => nil,
+        :user => nil,
+        :parts => [],
+        :overwrite => false,
+      }
+    )
+  end
+
+  def self.parse_options()
+    global_parse_options() do |opt,options|
+      opt.separator "General options:"
+      add_opt(opt,"-a", "--add", "Add some rights to a user") {
+        options[:operation] = :add
+      }
+      add_opt(opt,"-d", "--delete", "Delete some rights to a user") {
+        options[:operation] = :delete
+      }
+      parse_machinefile(opt,options)
+      add_opt(opt,"-l", "--list", "List the rights for a given user") {
+        options[:operation] = :show
+      }
+      add_opt(opt,"-m", "--machine MACHINE", "Include the machine in the operation") { |h|
+        h.strip!
+        load_machine(options[:nodes], h) if h != '*'
+      }
+      add_opt(opt,"-o", "--overwrite-rights", "Overwrite existing rights") {
+        options[:overwrite] = true
+      }
+      add_opt(opt,"-p", "--part PARTNAME", "Include the partition in the operation") { |p|
+        p.strip!
+        options[:parts] << p if p != '*'
+      }
+      parse_user(opt,options)
+    end
+  end
+
+  def self.check_options(options)
+    unless [:add,:show,:delete].include?(options[:operation])
+      error("You must choose an operation")
+      return false
+    end
+
+    case options[:operation]
+    when :show
+      if !options[:nodes].empty?
+        error('Node list is useless when showing rights of a specific user')
+        return false
+      end
+    else
+      unless options[:user]
+        error('You must choose a user')
+        return false
+      end
+    end
+
+    return true
+  end
+
+  def self.prepare(options)
+    params = super(options)
+
+    params[:overwrite] = true if options[:overwrite]
+
+    case options[:operation]
+      when :add
+        params[:username] = options[:user]
+        params[:partitions] = options[:parts] if !options[:parts].empty?
+      when :delete
+        params[:partitions] = options[:parts] if !options[:parts].empty?
+    end
+
+    params
+  end
+
+  def run(options,params)
+    params[:nodes] = nodes() if nodes()
+    path = api_path()
+    method = nil
+    case options[:operation]
+      when :add
+        method = :POST
+      when :show
+        method = :GET
+        path = File.join(path,options[:user]) if options[:user]
+      when :delete
+        method = :DELETE
+        path = File.join(path,options[:user])
+      else
+        raise
+    end
+
+    case method
+      when :GET
+        get(path,params)
+      when :POST
+        post(path,params)
+      when :PUT
+        put(path,params)
+      when :DELETE
+        delete(path,params)
+      else
+        raise
+    end
+  end
+
+  def result(options,ret)
+    case options[:operation]
+    when :show
+      print_headers()
+      ret.each do |user,nodes|
+        nodes.each do |node,parts|
+          print_rights(user,node,parts)
+        end
+      end
+    end
+  end
+end
+
+end
+
+if __FILE__ == $0
+  Kadeploy::KarightsClient.launch()
+end
